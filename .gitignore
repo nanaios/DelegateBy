@@ -1,0 +1,23 @@
+# Build outputs
+**/bin/
+**/obj/
+
+# Local work and packaged artifacts
+work/
+outputs/
+
+# IDE and user-specific files
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Test results
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# NuGet artifacts
+*.nupkg
+*.snupkg

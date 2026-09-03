@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DelegateBy.Generator/DelegateBy.Generator.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DelegateBy.Generator.Tests/DelegateBy.Generator.Tests.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/DelegateBy.Sample/DelegateBy.Sample.csproj" />
+  </Folder>
+</Solution>
