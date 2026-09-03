@@ -1,0 +1,77 @@
+name: Publish release
+run-name: Publish DelegateBy ${{ github.event.pull_request.title }}
+
+on:
+  pull_request:
+    branches:
+      - release
+    types:
+      - closed
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: publish-${{ github.event.pull_request.title }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.event.pull_request.title }}
+      MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Validate version title
+        shell: bash
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "The pull request title must be a SemVer version such as 0.1.0 or 0.2.0-beta.1."
+            exit 1
+          fi
+
+      - name: Check out merged release
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore DelegateBy.slnx
+
+      - name: Test
+        run: dotnet test tests/DelegateBy.Generator.Tests/DelegateBy.Generator.Tests.csproj --configuration Release --no-restore
+
+      - name: Pack
+        run: >-
+          dotnet pack src/DelegateBy.Generator/DelegateBy.Generator.csproj
+          --configuration Release
+          --no-restore
+          --output artifacts
+          -p:Version="$VERSION"
+          -p:ContinuousIntegrationBuild=true
+          -p:RepositoryCommit="$MERGE_SHA"
+
+      - name: Publish to GitHub Packages
+        run: >-
+          dotnet nuget push "artifacts/DelegateBy.$VERSION.nupkg"
+          --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+          --api-key "$GITHUB_TOKEN"
+          --skip-duplicate
+
+      - name: Create GitHub Release
+        run: >-
+          gh release create "v$VERSION"
+          "artifacts/DelegateBy.$VERSION.nupkg"
+          --repo "$GITHUB_REPOSITORY"
+          --target "$MERGE_SHA"
+          --title "$VERSION"
+          --generate-notes

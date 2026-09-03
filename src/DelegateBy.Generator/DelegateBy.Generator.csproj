@@ -9,9 +9,14 @@
 
     <PackageId>DelegateBy</PackageId>
     <Version>0.1.0</Version>
-    <Authors>DelegateBy contributors</Authors>
+    <Authors>nanaios</Authors>
     <Description>Kotlin-style interface delegation for C# using an incremental source generator.</Description>
     <PackageTags>csharp source-generator delegation kotlin analyzer</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/nanaios/DelegateBy</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/nanaios/DelegateBy</PackageProjectUrl>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <DevelopmentDependency>true</DevelopmentDependency>
     <IncludeBuildOutput>false</IncludeBuildOutput>
@@ -24,6 +29,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
     <None Include="$(OutputPath)$(AssemblyName).dll"
           Pack="true"
           PackagePath="analyzers/dotnet/cs"
