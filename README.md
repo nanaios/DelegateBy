@@ -9,7 +9,7 @@
 ```csharp
 using DelegateBy;
 
-[DelegateBy(typeof(IGreeter), nameof(_greeter))]
+[DelegateBy(nameof(_greeter))]
 public partial class GreeterService
 {
     private readonly IGreeter _greeter;
@@ -18,7 +18,7 @@ public partial class GreeterService
 }
 ```
 
-The generator adds `IGreeter` to the partial class and forwards its instance members to `_greeter`. A compatible public member written on the class or inherited from its base class takes precedence over generated delegation.
+The generator infers `IGreeter` from the declared type of `_greeter`, adds it to the partial class, and forwards its instance members to `_greeter`. A compatible public member written on the class or inherited from its base class takes precedence over generated delegation. The delegate field or readable property must be declared as an interface type; unbound generic interfaces, concrete types, `object`, `dynamic`, and type parameters are rejected. Constructed generic interfaces such as `IService<T>` are supported. A nullable interface is accepted with a `DBY010` warning and is null-forgiven when forwarded.
 
 ## Requirements
 
@@ -32,7 +32,7 @@ Add the GitHub Packages NuGet feed. GitHub currently requires authentication for
 
 ```powershell
 dotnet nuget add source --username YOUR_GITHUB_USERNAME --password YOUR_CLASSIC_PAT --store-password-in-clear-text --name github "https://nuget.pkg.github.com/nanaios/index.json"
-dotnet add package DelegateBy --version 0.1.0 --source github
+dotnet add package DelegateBy --version 0.2.0 --source github
 ```
 
 The classic personal access token needs the `read:packages` scope.

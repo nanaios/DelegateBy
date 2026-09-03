@@ -12,7 +12,7 @@ internal static class Diagnostics
 
     internal static readonly DiagnosticDescriptor InterfaceRequired = Create(
         "DBY002", "A closed interface type is required",
-        "'{0}' is not a closed interface type and cannot be delegated");
+        "The delegate member type '{0}' must be a closed interface type");
 
     internal static readonly DiagnosticDescriptor DelegateNotFound = Create(
         "DBY003", "Delegate member was not found",
@@ -41,6 +41,14 @@ internal static class Diagnostics
     internal static readonly DiagnosticDescriptor UnsupportedMember = Create(
         "DBY009", "Interface member requires a user implementation",
         "Member '{0}' cannot be delegated automatically; add a compatible implementation to '{1}'");
+
+    internal static readonly DiagnosticDescriptor NullableInterface = new(
+        "DBY010",
+        "Nullable interface delegate",
+        "Delegate member '{0}' is a nullable interface '{1}'; delegation will throw if it is null",
+        Category,
+        DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
 
     private static DiagnosticDescriptor Create(string id, string title, string message) =>
         new(id, title, message, Category, DiagnosticSeverity.Error, isEnabledByDefault: true);

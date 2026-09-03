@@ -13,3 +13,4 @@ DBY006 | DelegateBy | Error | Duplicate interface mapping
 DBY007 | DelegateBy | Error | Ambiguous delegated signature
 DBY008 | DelegateBy | Error | Existing member mismatch
 DBY009 | DelegateBy | Error | Unsupported interface member
+DBY010 | DelegateBy | Warning | Nullable interface delegate

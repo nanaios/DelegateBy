@@ -267,7 +267,7 @@ internal static class SourceEmitter
     private static void AppendGeneratedAttributes(StringBuilder builder, int indent)
     {
         AppendIndent(builder, indent);
-        builder.AppendLine("[global::System.CodeDom.Compiler.GeneratedCodeAttribute(\"DelegateBy\", \"0.1.0\")]");
+        builder.AppendLine("[global::System.CodeDom.Compiler.GeneratedCodeAttribute(\"DelegateBy\", \"0.2.0\")]");
         AppendIndent(builder, indent);
         builder.AppendLine("[global::System.Runtime.CompilerServices.CompilerGeneratedAttribute]");
         AppendIndent(builder, indent);
@@ -275,7 +275,8 @@ internal static class SourceEmitter
     }
 
     private static string DelegateExpression(DelegateByGenerator.DelegationMapping mapping) =>
-        "((" + TypeName(mapping.InterfaceType) + ")this." + Escape(mapping.DelegateMember.Name) + ")";
+        "((" + TypeName(mapping.InterfaceType) + ")this." + Escape(mapping.DelegateMember.Name) +
+        (mapping.NeedsNullSuppression ? "!" : string.Empty) + ")";
 
     private static string FormatParameter(IParameterSymbol parameter)
     {

@@ -8,7 +8,7 @@
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
 
     <PackageId>DelegateBy</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>nanaios</Authors>
     <Description>Kotlin-style interface delegation for C# using an incremental source generator.</Description>
     <PackageTags>csharp source-generator delegation kotlin analyzer</PackageTags>

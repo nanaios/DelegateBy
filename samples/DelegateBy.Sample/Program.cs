@@ -31,7 +31,7 @@ public sealed class Greeter : IGreeter
     }
 }
 
-[DelegateBy(typeof(IGreeter), nameof(_greeter))]
+[DelegateBy(nameof(_greeter))]
 public partial class GreeterService
 {
     private readonly IGreeter _greeter;

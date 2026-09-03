@@ -24,13 +24,11 @@ namespace DelegateBy
     [global::System.AttributeUsage(global::System.AttributeTargets.Class, AllowMultiple = true, Inherited = false)]
     internal sealed class DelegateByAttribute : global::System.Attribute
     {
-        public DelegateByAttribute(global::System.Type interfaceType, string memberName)
+        public DelegateByAttribute(string memberName)
         {
-            InterfaceType = interfaceType;
             MemberName = memberName;
         }
 
-        public global::System.Type InterfaceType { get; }
         public string MemberName { get; }
     }
 }
@@ -99,35 +97,9 @@ namespace DelegateBy
             var location = attribute.ApplicationSyntaxReference?.GetSyntax().GetLocation()
                 ?? type.Locations.FirstOrDefault();
 
-            var interfaceType = attribute.ConstructorArguments.Length > 0
-                ? attribute.ConstructorArguments[0].Value as INamedTypeSymbol
+            var memberName = attribute.ConstructorArguments.Length > 0
+                ? attribute.ConstructorArguments[0].Value as string
                 : null;
-            var memberName = attribute.ConstructorArguments.Length > 1
-                ? attribute.ConstructorArguments[1].Value as string
-                : null;
-
-            if (interfaceType is null ||
-                interfaceType.TypeKind != TypeKind.Interface ||
-                interfaceType.IsUnboundGenericType ||
-                ContainsTypeParameter(interfaceType))
-            {
-                context.ReportDiagnostic(Diagnostic.Create(
-                    Diagnostics.InterfaceRequired,
-                    location,
-                    interfaceType?.ToDisplayString() ?? "<unknown>"));
-                hasError = true;
-                continue;
-            }
-
-            if (!mappedInterfaces.Add(interfaceType))
-            {
-                context.ReportDiagnostic(Diagnostic.Create(
-                    Diagnostics.DuplicateInterface,
-                    location,
-                    interfaceType.ToDisplayString()));
-                hasError = true;
-                continue;
-            }
 
             if (string.IsNullOrWhiteSpace(memberName))
             {
@@ -168,6 +140,42 @@ namespace DelegateBy
 
             var delegateMember = usableMembers[0];
             var delegateType = GetDelegateType(delegateMember)!;
+            if (delegateType is not INamedTypeSymbol interfaceType ||
+                interfaceType.TypeKind != TypeKind.Interface ||
+                interfaceType.IsUnboundGenericType)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    Diagnostics.InterfaceRequired,
+                    location,
+                    delegateType.ToDisplayString()));
+                hasError = true;
+                continue;
+            }
+
+            var hasNullableInterface = interfaceType.NullableAnnotation == NullableAnnotation.Annotated;
+            // Nullable annotations are not part of an implemented interface list. Keep the
+            // contract non-nullable and suppress the warning at the actual delegate access.
+            interfaceType = (INamedTypeSymbol)interfaceType.WithNullableAnnotation(NullableAnnotation.NotAnnotated);
+
+            if (hasNullableInterface)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    Diagnostics.NullableInterface,
+                    location,
+                    delegateMember.Name,
+                    interfaceType.ToDisplayString()));
+            }
+
+            if (!mappedInterfaces.Add(interfaceType))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    Diagnostics.DuplicateInterface,
+                    location,
+                    interfaceType.ToDisplayString()));
+                hasError = true;
+                continue;
+            }
+
             var conversion = compilation.ClassifyConversion(delegateType, interfaceType);
             if (!conversion.IsImplicit)
             {
@@ -181,7 +189,7 @@ namespace DelegateBy
                 continue;
             }
 
-            mappings.Add(new DelegationMapping(interfaceType, delegateMember, location));
+            mappings.Add(new DelegationMapping(interfaceType, delegateMember, location, hasNullableInterface));
         }
 
         var planned = new Dictionary<string, PlannedMember>(StringComparer.Ordinal);
@@ -494,15 +502,6 @@ namespace DelegateBy
         return SymbolEqualityComparer.Default.Equals(left, right);
     }
 
-    private static bool ContainsTypeParameter(ITypeSymbol type) => type switch
-    {
-        ITypeParameterSymbol => true,
-        IArrayTypeSymbol array => ContainsTypeParameter(array.ElementType),
-        IPointerTypeSymbol pointer => ContainsTypeParameter(pointer.PointedAtType),
-        INamedTypeSymbol named => named.TypeArguments.Any(ContainsTypeParameter),
-        _ => false,
-    };
-
     private static bool ContractsCanShareImplementation(ISymbol left, ISymbol right) =>
         (left, right) switch
         {
@@ -574,16 +573,22 @@ namespace DelegateBy
 
     internal sealed class DelegationMapping
     {
-        internal DelegationMapping(INamedTypeSymbol interfaceType, ISymbol delegateMember, Location? location)
+        internal DelegationMapping(
+            INamedTypeSymbol interfaceType,
+            ISymbol delegateMember,
+            Location? location,
+            bool needsNullSuppression)
         {
             InterfaceType = interfaceType;
             DelegateMember = delegateMember;
             Location = location;
+            NeedsNullSuppression = needsNullSuppression;
         }
 
         internal INamedTypeSymbol InterfaceType { get; }
         internal ISymbol DelegateMember { get; }
         internal Location? Location { get; }
+        internal bool NeedsNullSuppression { get; }
     }
 
     internal sealed class PlannedMember
