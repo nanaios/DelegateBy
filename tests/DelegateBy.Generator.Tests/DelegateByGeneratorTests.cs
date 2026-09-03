@@ -29,7 +29,7 @@ public sealed class DelegateByGeneratorTests
                 public ValueTask<string> LoadAsync() => new("done");
             }
 
-            [DelegateBy(typeof(IAdvanced), nameof(_advanced))]
+            [DelegateBy(nameof(_advanced))]
             public partial class Wrapper
             {
                 private readonly IAdvanced _advanced = new Advanced();
@@ -80,7 +80,7 @@ public sealed class DelegateByGeneratorTests
                 }
             }
 
-            [DelegateBy(typeof(IWorker), nameof(_worker))]
+            [DelegateBy(nameof(_worker))]
             public partial class Service
             {
                 private readonly IWorker _worker = new Worker();
@@ -106,7 +106,7 @@ public sealed class DelegateByGeneratorTests
             public interface IValue { int Get(); }
             public sealed class Value : IValue { public int Get() => 1; }
 
-            [DelegateBy(typeof(IValue), nameof(_value))]
+            [DelegateBy(nameof(_value))]
             public partial class Wrapper
             {
                 private readonly IValue _value = new Value();
@@ -130,7 +130,7 @@ public sealed class DelegateByGeneratorTests
             public sealed class Value : IValue { public int Get() => 1; }
             public class Base { public int Get() => 7; }
 
-            [DelegateBy(typeof(IValue), nameof(_value))]
+            [DelegateBy(nameof(_value))]
             public partial class Wrapper : Base
             {
                 private readonly IValue _value = new Value();
@@ -153,8 +153,8 @@ public sealed class DelegateByGeneratorTests
             public sealed class Left : ILeft { public void Reset() { } }
             public sealed class Right : IRight { public void Reset() { } }
 
-            [DelegateBy(typeof(ILeft), nameof(_left))]
-            [DelegateBy(typeof(IRight), nameof(_right))]
+            [DelegateBy(nameof(_left))]
+            [DelegateBy(nameof(_right))]
             public partial class Wrapper
             {
                 private readonly ILeft _left = new Left();
@@ -177,8 +177,8 @@ public sealed class DelegateByGeneratorTests
             public sealed class Left : ILeft { public void Reset() { } }
             public sealed class Right : IRight { public void Reset() { } }
 
-            [DelegateBy(typeof(ILeft), nameof(_left))]
-            [DelegateBy(typeof(IRight), nameof(_right))]
+            [DelegateBy(nameof(_left))]
+            [DelegateBy(nameof(_right))]
             public partial class Wrapper
             {
                 private readonly ILeft _left = new Left();
@@ -194,14 +194,14 @@ public sealed class DelegateByGeneratorTests
 
     [Theory]
     [InlineData("public class Wrapper", "private readonly IFoo _foo = null!;", "DBY001")]
-    [InlineData("public partial class Wrapper", "private readonly object _foo = new();", "DBY005")]
+    [InlineData("public partial class Wrapper", "private readonly object _foo = new();", "DBY002")]
     [InlineData("public partial class Wrapper", "private IFoo Foo { set { } }", "DBY004")]
     public void ReportsInvalidTargetOrDelegate(string declaration, string member, string diagnosticId)
     {
         var source = $$"""
             using DelegateBy;
             public interface IFoo { void Run(); }
-            [DelegateBy(typeof(IFoo), "{{(member.Contains("Foo") ? "Foo" : "_foo")}}")]
+            [DelegateBy("{{(member.Contains("Foo") ? "Foo" : "_foo")}}")]
             {{declaration}}
             {
                 {{member}}
@@ -219,15 +219,15 @@ public sealed class DelegateByGeneratorTests
         const string missing = """
             using DelegateBy;
             public interface IFoo { void Run(); }
-            [DelegateBy(typeof(IFoo), "missing")]
+            [DelegateBy("missing")]
             public partial class Wrapper { }
             """;
         const string duplicate = """
             using DelegateBy;
             public interface IFoo { void Run(); }
             public sealed class Foo : IFoo { public void Run() { } }
-            [DelegateBy(typeof(IFoo), nameof(_one))]
-            [DelegateBy(typeof(IFoo), nameof(_two))]
+            [DelegateBy(nameof(_one))]
+            [DelegateBy(nameof(_two))]
             public partial class Wrapper
             {
                 private readonly IFoo _one = new Foo();
@@ -246,7 +246,7 @@ public sealed class DelegateByGeneratorTests
             using DelegateBy;
             public interface IFoo { int Run(); }
             public sealed class Foo : IFoo { public int Run() => 1; }
-            [DelegateBy(typeof(IFoo), nameof(_foo))]
+            [DelegateBy(nameof(_foo))]
             public partial class Wrapper
             {
                 private readonly IFoo _foo = new Foo();
@@ -269,14 +269,14 @@ public sealed class DelegateByGeneratorTests
 
             public partial class Outer<T> where T : class
             {
-                [DelegateBy(typeof(IFoo), nameof(_foo))]
+                [DelegateBy(nameof(_foo))]
                 public partial class Nested
                 {
                     private readonly IFoo _foo = new Foo();
                 }
             }
 
-            [DelegateBy(typeof(IFoo), nameof(_foo))]
+            [DelegateBy(nameof(_foo))]
             public partial record class RecordWrapper
             {
                 private readonly IFoo _foo = new Foo();
@@ -296,18 +296,128 @@ public sealed class DelegateByGeneratorTests
             using DelegateBy;
             public interface IFoo { static abstract int Value { get; } }
             public sealed class Foo : IFoo { public static int Value => 1; }
-            [DelegateBy(typeof(IFoo), nameof(_foo))]
+            [DelegateBy(nameof(_foo))]
             public partial class Wrapper { private readonly IFoo _foo = new Foo(); }
             """;
         const string initSource = """
             using DelegateBy;
             public interface IFoo { string Name { get; init; } }
             public sealed class Foo : IFoo { public string Name { get; init; } = "x"; }
-            [DelegateBy(typeof(IFoo), nameof(_foo))]
+            [DelegateBy(nameof(_foo))]
             public partial class Wrapper { private readonly IFoo _foo = new Foo(); }
             """;
 
         Assert.Contains(GeneratorTestHost.Run(staticSource).Errors, diagnostic => diagnostic.Id == "DBY009");
         Assert.Contains(GeneratorTestHost.Run(initSource).Errors, diagnostic => diagnostic.Id == "DBY009");
+    }
+
+    [Fact]
+    public void InfersInterfaceFromDelegateMemberAndSuppressesNullableAccess()
+    {
+        const string source = """
+            using DelegateBy;
+            public interface IFoo { int Run(); }
+            public sealed class Foo : IFoo { public int Run() => 1; }
+
+            [DelegateBy(nameof(_foo))]
+            public partial class Wrapper
+            {
+                private readonly IFoo? _foo = new Foo();
+            }
+            """;
+
+        var result = GeneratorTestHost.Run(source);
+
+        Assert.Empty(result.Errors);
+        Assert.Contains(result.GeneratorDiagnostics, diagnostic => diagnostic.Id == "DBY010");
+        Assert.Contains("partial class Wrapper : global::IFoo", result.DelegationSource);
+        Assert.Contains("((global::IFoo)this._foo!).Run()", result.DelegationSource);
+    }
+
+    [Fact]
+    public void InfersInterfaceFromReadableProperty()
+    {
+        const string source = """
+            using DelegateBy;
+            public interface IFoo { int Run(); }
+            public sealed class Foo : IFoo { public int Run() => 1; }
+
+            [DelegateBy(nameof(Foo))]
+            public partial class Wrapper
+            {
+                public IFoo Foo { get; } = new Foo();
+            }
+            """;
+
+        var result = GeneratorTestHost.Run(source);
+
+        Assert.Empty(result.Errors);
+        Assert.Contains("partial class Wrapper : global::IFoo", result.DelegationSource);
+        Assert.Contains("this.Foo).Run()", result.DelegationSource);
+    }
+
+    [Fact]
+    public void InfersConstructedGenericInterfaceContainingTypeParameter()
+    {
+        const string source = """
+            using DelegateBy;
+            public interface IService<T> { T Get(T value); }
+            public sealed class Service<T> : IService<T> { public T Get(T value) => value; }
+
+            [DelegateBy(nameof(_service))]
+            public partial class Wrapper<T>
+            {
+                private readonly IService<T> _service = new Service<T>();
+            }
+            """;
+
+        var result = GeneratorTestHost.Run(source);
+
+        Assert.Empty(result.Errors);
+        Assert.Contains("partial class Wrapper<T> : global::IService<T>", result.DelegationSource);
+    }
+
+    [Theory]
+    [InlineData("private readonly Foo _foo = new();")]
+    [InlineData("private readonly object _foo = new();")]
+    [InlineData("private readonly dynamic _foo = new object();")]
+    [InlineData("private readonly T _foo;\n                public Wrapper(T foo) => _foo = foo;")]
+    public void ReportsNonInterfaceDelegateTypes(string member)
+    {
+        var source = $$"""
+            using DelegateBy;
+            public interface IFoo { void Run(); }
+            public sealed class Foo : IFoo { public void Run() { } }
+            [DelegateBy(nameof(_foo))]
+            public partial class Wrapper{{(member.Contains(" T ") ? "<T>" : "")}}
+            {
+                {{member}}
+            }
+            """;
+
+        var result = GeneratorTestHost.Run(source);
+
+        Assert.Contains(result.Errors, diagnostic => diagnostic.Id == "DBY002");
+    }
+
+    [Fact]
+    public void RejectsTheRemovedTwoArgumentAttributeSyntax()
+    {
+        const string source = """
+            using DelegateBy;
+            public interface IFoo { void Run(); }
+            public sealed class Foo : IFoo { public void Run() { } }
+            [DelegateBy(typeof(IFoo), nameof(_foo))]
+            public partial class Wrapper
+            {
+                private readonly IFoo _foo = new Foo();
+            }
+            """;
+
+        var result = GeneratorTestHost.Run(source);
+
+        Assert.Contains(result.Errors, diagnostic => diagnostic.Id == "CS1729");
+        Assert.DoesNotContain(result.GeneratedSources.Keys,
+            key => key.EndsWith(".DelegateBy.g.cs", StringComparison.Ordinal));
     }
 }
