@@ -23,7 +23,9 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Restore
         run: dotnet restore DelegateBy.slnx
@@ -33,3 +35,21 @@ jobs:
 
       - name: Test
         run: dotnet test tests/DelegateBy.Generator.Tests/DelegateBy.Generator.Tests.csproj --configuration Release --no-build
+
+      - name: Pack NuGet
+        run: dotnet pack src/DelegateBy.Generator/DelegateBy.Generator.csproj --configuration Release --no-build --output artifacts -p:Version=0.3.0
+
+      - name: Validate NuGet
+        shell: pwsh
+        run: ./packaging/Validate-Package.ps1 -PackagePath artifacts/DelegateBy.0.3.0.nupkg
+
+      - name: NuGet consumer smoke test
+        shell: pwsh
+        run: ./packaging/Smoke-NuGet.ps1 -PackagePath artifacts/DelegateBy.0.3.0.nupkg
+
+      - name: Build and validate UPM archive
+        shell: pwsh
+        run: |
+          ./packaging/Build-UpmPackage.ps1 -Version 0.3.0
+          ./packaging/Validate-Package.ps1 -PackagePath artifacts/com.nanaios.delegateby-0.3.0.tgz
+          ./packaging/Test-Packaging.ps1 -ArchivePath artifacts/com.nanaios.delegateby-0.3.0.tgz

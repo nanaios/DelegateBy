@@ -1,0 +1,10 @@
+{
+  "name": "com.nanaios.delegateby",
+  "version": "0.3.0",
+  "displayName": "DelegateBy",
+  "description": "Kotlin-style interface delegation for C# source generators.",
+  "unity": "6000.0",
+  "author": { "name": "nanaios", "url": "https://github.com/nanaios/DelegateBy" },
+  "repository": { "type": "git", "url": "https://github.com/nanaios/DelegateBy.git" },
+  "license": "MIT"
+}

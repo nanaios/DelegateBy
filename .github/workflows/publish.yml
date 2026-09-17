@@ -1,21 +1,15 @@
 name: Publish release
 run-name: Publish DelegateBy ${{ github.event.pull_request.title }}
-
 on:
   pull_request:
-    branches:
-      - release
-    types:
-      - closed
-
+    branches: [release]
+    types: [closed]
 permissions:
   contents: write
   packages: write
-
 concurrency:
-  group: publish-${{ github.event.pull_request.title }}
+  group: publish-release
   cancel-in-progress: false
-
 jobs:
   publish:
     if: github.event.pull_request.merged == true
@@ -23,55 +17,128 @@ jobs:
     env:
       VERSION: ${{ github.event.pull_request.title }}
       MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Validate version title
         shell: bash
         run: |
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "The pull request title must be a SemVer version such as 0.1.0 or 0.2.0-beta.1."
-            exit 1
-          fi
-
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then echo "Invalid SemVer title"; exit 1; fi
       - name: Check out merged release
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
-
+          ref: ${{ env.MERGE_SHA }}
+          fetch-depth: 0
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
-
-      - name: Restore
-        run: dotnet restore DelegateBy.slnx
-
-      - name: Test
-        run: dotnet test tests/DelegateBy.Generator.Tests/DelegateBy.Generator.Tests.csproj --configuration Release --no-restore
-
-      - name: Pack
-        run: >-
-          dotnet pack src/DelegateBy.Generator/DelegateBy.Generator.csproj
-          --configuration Release
-          --no-restore
-          --output artifacts
-          -p:Version="$VERSION"
-          -p:ContinuousIntegrationBuild=true
-          -p:RepositoryCommit="$MERGE_SHA"
-
-      - name: Publish to GitHub Packages
-        run: >-
-          dotnet nuget push "artifacts/DelegateBy.$VERSION.nupkg"
-          --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
-          --api-key "$GITHUB_TOKEN"
-          --skip-duplicate
-
-      - name: Create GitHub Release
-        run: >-
-          gh release create "v$VERSION"
-          "artifacts/DelegateBy.$VERSION.nupkg"
-          --repo "$GITHUB_REPOSITORY"
-          --target "$MERGE_SHA"
-          --title "$VERSION"
-          --generate-notes
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Restore and test
+        run: |
+          dotnet restore DelegateBy.slnx
+          dotnet test tests/DelegateBy.Generator.Tests/DelegateBy.Generator.Tests.csproj --configuration Release --no-restore
+      - name: Pack and validate artifacts
+        shell: pwsh
+        run: |
+          dotnet pack src/DelegateBy.Generator/DelegateBy.Generator.csproj --configuration Release --no-restore --output artifacts -p:Version="$env:VERSION" -p:ContinuousIntegrationBuild=true -p:RepositoryCommit="$env:MERGE_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'NuGet pack failed' }
+          ./packaging/Build-UpmPackage.ps1 -Version "$env:VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'UPM pack failed' }
+          ./packaging/Validate-Package.ps1 -PackagePath "artifacts/DelegateBy.$env:VERSION.nupkg"
+          if ($LASTEXITCODE -ne 0) { throw 'NuGet validation failed' }
+          ./packaging/Validate-Package.ps1 -PackagePath "artifacts/com.nanaios.delegateby-$env:VERSION.tgz"
+          if ($LASTEXITCODE -ne 0) { throw 'UPM validation failed' }
+          ./packaging/Smoke-NuGet.ps1 -PackagePath "artifacts/DelegateBy.$env:VERSION.nupkg"
+      - name: Preflight existing release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/existing-release"
+          # Listing distinguishes a missing release from authentication/network errors.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[]' |
+            jq -s --arg tag "v$VERSION" '[.[] | select(.tag_name == $tag)] | first // {}' > "$RUNNER_TEMP/release.json"
+          for name in "DelegateBy.$VERSION.nupkg" "com.nanaios.delegateby-$VERSION.tgz"; do
+            if jq -e --arg name "$name" 'any(.assets[]?; .name == $name)' "$RUNNER_TEMP/release.json" >/dev/null; then
+              gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir "$RUNNER_TEMP/existing-release"
+              pwsh -File packaging/Compare-Archives.ps1 -Expected "artifacts/$name" -Actual "$RUNNER_TEMP/existing-release/$name"
+            fi
+          done
+      - name: Preflight existing NuGet package
+        id: nuget
+        shell: pwsh
+        run: ./packaging/Test-PublishedNuGet.ps1 -PackagePath "artifacts/DelegateBy.$env:VERSION.nupkg" -Owner "${{ github.repository_owner }}"
+      - name: Preflight existing UPM tag content
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing=$(git ls-remote origin "refs/tags/upm/v$VERSION^{}" | awk '{print $1}')
+          if [[ -z "$existing" ]]; then existing=$(git ls-remote origin "refs/tags/upm/v$VERSION" | awk '{print $1}'); fi
+          if [[ -n "$existing" ]]; then
+            git fetch origin "refs/tags/upm/v$VERSION"
+            mkdir -p "$RUNNER_TEMP/upm-preflight" "$RUNNER_TEMP/upm-current"
+            git -c core.autocrlf=false archive FETCH_HEAD | tar -x -C "$RUNNER_TEMP/upm-preflight"
+            tar -xzf "artifacts/com.nanaios.delegateby-$VERSION.tgz" -C "$RUNNER_TEMP/upm-current"
+            diff -qr "$RUNNER_TEMP/upm-preflight" "$RUNNER_TEMP/upm-current/package" >/dev/null || { echo "Existing UPM tag has different content"; exit 1; }
+          fi
+      - name: Verify source tag or create it
+        shell: bash
+        run: |
+          tag="v$VERSION"; existing=$(git ls-remote origin "refs/tags/$tag^{}" | awk '{print $1}')
+          if [[ -z "$existing" ]]; then existing=$(git ls-remote origin "refs/tags/$tag" | awk '{print $1}'); fi
+          if [[ -n "$existing" && "$existing" != "$MERGE_SHA" ]]; then echo "Source tag points to another commit"; exit 1; fi
+          if [[ -z "$existing" ]]; then git config user.name github-actions; git config user.email 41898282+github-actions[bot]@users.noreply.github.com; git tag -a "$tag" "$MERGE_SHA" -m "$VERSION"; git push origin "$tag"; fi
+      - name: Update UPM branch and version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/upm-package"; mkdir -p "$stage"; tar -xzf "artifacts/com.nanaios.delegateby-$VERSION.tgz" -C "$stage"
+          existing=$(git ls-remote origin "refs/tags/upm/v$VERSION^{}" | awk '{print $1}')
+          if [[ -z "$existing" ]]; then existing=$(git ls-remote origin "refs/tags/upm/v$VERSION" | awk '{print $1}'); fi
+          if [[ -n "$existing" ]]; then
+            git fetch origin "refs/tags/upm/v$VERSION"
+            old="$RUNNER_TEMP/upm-existing"; mkdir -p "$old"; git -c core.autocrlf=false archive FETCH_HEAD | tar -x -C "$old"
+            diff -qr "$stage/package" "$old" >/dev/null || { echo "Existing UPM tag has different content"; exit 1; }
+            echo "Existing UPM tag has matching normalized content; no mutation required."
+            exit 0
+          fi
+          upm_ref=$(git ls-remote origin refs/heads/upm)
+          if [[ -n "$upm_ref" ]]; then git fetch origin refs/heads/upm:refs/remotes/origin/upm; git worktree add --detach "$RUNNER_TEMP/upm-work" origin/upm; else git worktree add --detach "$RUNNER_TEMP/upm-work"; git -C "$RUNNER_TEMP/upm-work" checkout --orphan upm; fi
+          git -C "$RUNNER_TEMP/upm-work" rm -rf .
+          git -C "$RUNNER_TEMP/upm-work" clean -fdx
+          cp -a "$stage/package/." "$RUNNER_TEMP/upm-work/"; git -C "$RUNNER_TEMP/upm-work" -c core.autocrlf=false add -A
+          if git -C "$RUNNER_TEMP/upm-work" diff --cached --quiet; then commit=$(git -C "$RUNNER_TEMP/upm-work" rev-parse HEAD); else git -C "$RUNNER_TEMP/upm-work" -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com commit -m "UPM $VERSION"; commit=$(git -C "$RUNNER_TEMP/upm-work" rev-parse HEAD); fi
+          git -C "$RUNNER_TEMP/upm-work" config user.name github-actions
+          git -C "$RUNNER_TEMP/upm-work" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C "$RUNNER_TEMP/upm-work" tag -a "upm/v$VERSION" "$commit" -m "UPM $VERSION"
+          git -C "$RUNNER_TEMP/upm-work" push --atomic origin HEAD:refs/heads/upm "refs/tags/upm/v$VERSION"
+      - name: Create draft GitHub Release
+        shell: bash
+        run: |
+          if jq -e '.id' "$RUNNER_TEMP/release.json" >/dev/null; then
+            echo "Release already exists; keeping it in its current draft state."
+          else
+            args=()
+            if [[ "$VERSION" == *-* ]]; then args+=(--prerelease); fi
+            gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$VERSION" --generate-notes --draft "${args[@]}"
+          fi
+      - name: Publish NuGet package
+        if: steps.nuget.outputs.exists != 'true'
+        run: dotnet nuget push "artifacts/DelegateBy.$VERSION.nupkg" --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" --api-key "$GH_TOKEN"
+      - name: Upload release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_or_upload() {
+            local file="$1"; local name
+            name=$(basename "$file")
+            if jq -e --arg name "$name" 'any(.assets[]?; .name == $name)' "$RUNNER_TEMP/release.json" >/dev/null; then
+              echo "Release asset $name was verified during preflight."
+            else
+              gh release upload "v$VERSION" "$file" --repo "$GITHUB_REPOSITORY"
+            fi
+          }
+          check_or_upload "artifacts/DelegateBy.$VERSION.nupkg"
+          check_or_upload "artifacts/com.nanaios.delegateby-$VERSION.tgz"
+      - name: Publish completed release
+        run: gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false

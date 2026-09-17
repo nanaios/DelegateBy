@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using DelegateBy;
 
 namespace DelegateBy.Generator.Tests;
 
@@ -12,14 +13,26 @@ internal static class GeneratorTestHost
         .Select(path => MetadataReference.CreateFromFile(path))
         .ToImmutableArray<MetadataReference>();
 
-    internal static GeneratorResult Run(string source)
+    private static readonly MetadataReference AttributesReference =
+        MetadataReference.CreateFromFile(typeof(DelegateByAttribute).Assembly.Location);
+
+    internal static GeneratorResult Run(string source) => Run(source, LanguageVersion.Preview, false);
+
+    internal static GeneratorResult RunCSharp9(string source) => Run(source, LanguageVersion.CSharp9, false);
+
+    internal static GeneratorResult RunWithAttributesSymbol(string source) =>
+        Run(source, LanguageVersion.Preview, true);
+
+    private static GeneratorResult Run(string source, LanguageVersion languageVersion, bool keepAttributes)
     {
-        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
+        var parseOptions = new CSharpParseOptions(
+            languageVersion,
+            preprocessorSymbols: keepAttributes ? new[] { "DELEGATEBY_ATTRIBUTES" } : null);
         var syntaxTree = CSharpSyntaxTree.ParseText(source, parseOptions);
         var compilation = CSharpCompilation.Create(
             "GeneratorTests",
             new[] { syntaxTree },
-            References,
+            References.Add(AttributesReference),
             new CSharpCompilationOptions(
                 OutputKind.DynamicallyLinkedLibrary,
                 nullableContextOptions: NullableContextOptions.Enable,

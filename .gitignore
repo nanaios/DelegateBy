@@ -21,3 +21,6 @@ TestResults/
 # NuGet artifacts
 *.nupkg
 *.snupkg
+
+# Locally generated release packages
+artifacts/*.tgz

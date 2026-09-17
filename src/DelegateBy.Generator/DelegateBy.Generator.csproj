@@ -8,7 +8,7 @@
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
 
     <PackageId>DelegateBy</PackageId>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <Authors>nanaios</Authors>
     <Description>Kotlin-style interface delegation for C# using an incremental source generator.</Description>
     <PackageTags>csharp source-generator delegation kotlin analyzer</PackageTags>
@@ -18,14 +18,14 @@
     <RepositoryUrl>https://github.com/nanaios/DelegateBy</RepositoryUrl>
     <PackageProjectUrl>https://github.com/nanaios/DelegateBy</PackageProjectUrl>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
-    <DevelopmentDependency>true</DevelopmentDependency>
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
     <NoPackageAnalysis>true</NoPackageAnalysis>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.11.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.3.0-3.final" PrivateAssets="all" />
+    <ProjectReference Include="../DelegateBy.Attributes/DelegateBy.Attributes.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
@@ -34,6 +34,19 @@
           Pack="true"
           PackagePath="analyzers/dotnet/cs"
           Visible="false" />
+    <None Include="../DelegateBy.Attributes/$(OutputPath)DelegateBy.Attributes.dll"
+          Pack="true" PackagePath="lib/netstandard2.0/DelegateBy.Attributes.dll"
+          Visible="false" />
     <AdditionalFiles Include="AnalyzerReleases.Unshipped.md" />
+  </ItemGroup>
+
+  <Target Name="GenerateDelegateByBuildInfo" BeforeTargets="CoreCompile">
+    <WriteLinesToFile
+      File="$(IntermediateOutputPath)DelegateByBuildInfo.g.cs"
+      Lines="namespace DelegateBy.Generator { internal static class BuildInfo { internal const string Version = &quot;$(Version)&quot;%3B } }"
+      Overwrite="true" />
+  </Target>
+  <ItemGroup>
+    <Compile Include="$(IntermediateOutputPath)DelegateByBuildInfo.g.cs" Visible="false" />
   </ItemGroup>
 </Project>
