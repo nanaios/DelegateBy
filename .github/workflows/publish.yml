@@ -1,10 +1,16 @@
 name: Publish release
-run-name: Publish DelegateBy ${{ github.event.pull_request.title }}
+run-name: Publish DelegateBy ${{ github.event.pull_request.title || inputs.version }}
 
 on:
   pull_request:
     branches: [release]
     types: [closed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing release version to verify or complete
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -16,11 +22,10 @@ concurrency:
 
 jobs:
   publish:
-    if: github.event.pull_request.merged == true
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     env:
-      VERSION: ${{ github.event.pull_request.title }}
-      MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+      VERSION: ${{ github.event.pull_request.title || inputs.version }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Validate version title
@@ -29,8 +34,12 @@ jobs:
       - name: Check out merged release
         uses: actions/checkout@v7
         with:
-          ref: ${{ env.MERGE_SHA }}
+          ref: ${{ github.event.pull_request.merge_commit_sha || format('refs/tags/v{0}', inputs.version) }}
           fetch-depth: 0
+      - name: Resolve checked out source
+        id: source
+        shell: bash
+        run: echo "merge-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Package and validate
         id: package
         uses: ./.github/actions/package
@@ -94,9 +103,17 @@ jobs:
           auth = base64.b64encode((actor + ':' + token).encode()).decode()
           headers = {'Authorization': 'Basic ' + auth, 'Accept': 'application/json'}
           service = 'https://nuget.pkg.github.com/%s/index.json' % owner
+          class SafeRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  old = urllib.parse.urlparse(req.full_url); new = urllib.parse.urlparse(newurl)
+                  if new.scheme != 'https': raise RuntimeError('NuGet redirect must use HTTPS')
+                  redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+                  if old.hostname != new.hostname: redirected.headers.pop('Authorization', None)
+                  return redirected
+          opener = urllib.request.build_opener(SafeRedirect)
           def get(url):
               req = urllib.request.Request(url, headers=headers)
-              try: return urllib.request.urlopen(req)
+              try: return opener.open(req)
               except urllib.error.HTTPError as e:
                   if e.code == 404: return e
                   raise RuntimeError('NuGet request failed with HTTP %s' % e.code)
@@ -143,8 +160,8 @@ jobs:
         run: |
           set -euo pipefail
           tag="v$VERSION"; existing=$(git ls-remote origin "refs/tags/$tag^{}" | awk '{print $1}'); [[ -n "$existing" ]] || existing=$(git ls-remote origin "refs/tags/$tag" | awk '{print $1}')
-          if [[ -n "$existing" && "$existing" != "$MERGE_SHA" ]]; then echo 'Source tag points to another commit'; exit 1; fi
-          if [[ -z "$existing" ]]; then git config user.name github-actions; git config user.email 41898282+github-actions[bot]@users.noreply.github.com; git tag -a "$tag" "$MERGE_SHA" -m "$VERSION"; git push origin "$tag"; fi
+          if [[ -n "$existing" && "$existing" != "${{ steps.source.outputs.merge-sha }}" ]]; then echo 'Source tag points to another commit'; exit 1; fi
+          if [[ -z "$existing" ]]; then git config user.name github-actions; git config user.email 41898282+github-actions[bot]@users.noreply.github.com; git tag -a "$tag" "${{ steps.source.outputs.merge-sha }}" -m "$VERSION"; git push origin "$tag"; fi
       - name: Update UPM branch and version tag
         shell: bash
         run: |
