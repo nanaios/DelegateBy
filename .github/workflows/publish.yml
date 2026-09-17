@@ -1,15 +1,19 @@
 name: Publish release
 run-name: Publish DelegateBy ${{ github.event.pull_request.title }}
+
 on:
   pull_request:
     branches: [release]
     types: [closed]
+
 permissions:
   contents: write
   packages: write
+
 concurrency:
   group: publish-release
   cancel-in-progress: false
+
 jobs:
   publish:
     if: github.event.pull_request.merged == true
@@ -21,107 +25,139 @@ jobs:
     steps:
       - name: Validate version title
         shell: bash
-        run: |
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then echo "Invalid SemVer title"; exit 1; fi
+        run: '[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "Invalid SemVer title"; exit 1; }'
       - name: Check out merged release
         uses: actions/checkout@v7
         with:
           ref: ${{ env.MERGE_SHA }}
           fetch-depth: 0
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v6
+      - name: Package and validate
+        id: package
+        uses: ./.github/actions/package
         with:
-          dotnet-version: |
-            8.0.x
-            10.0.x
-      - name: Restore and test
-        run: |
-          dotnet restore DelegateBy.slnx
-          dotnet test tests/DelegateBy.Generator.Tests/DelegateBy.Generator.Tests.csproj --configuration Release --no-restore
-      - name: Pack and validate artifacts
-        shell: pwsh
-        run: |
-          dotnet pack src/DelegateBy.Generator/DelegateBy.Generator.csproj --configuration Release --no-restore --output artifacts -p:Version="$env:VERSION" -p:ContinuousIntegrationBuild=true -p:RepositoryCommit="$env:MERGE_SHA"
-          if ($LASTEXITCODE -ne 0) { throw 'NuGet pack failed' }
-          ./packaging/Build-UpmPackage.ps1 -Version "$env:VERSION"
-          if ($LASTEXITCODE -ne 0) { throw 'UPM pack failed' }
-          ./packaging/Validate-Package.ps1 -PackagePath "artifacts/DelegateBy.$env:VERSION.nupkg"
-          if ($LASTEXITCODE -ne 0) { throw 'NuGet validation failed' }
-          ./packaging/Validate-Package.ps1 -PackagePath "artifacts/com.nanaios.delegateby-$env:VERSION.tgz"
-          if ($LASTEXITCODE -ne 0) { throw 'UPM validation failed' }
-          ./packaging/Smoke-NuGet.ps1 -PackagePath "artifacts/DelegateBy.$env:VERSION.nupkg"
+          version: ${{ env.VERSION }}
       - name: Preflight existing release assets
+        env:
+          ARTIFACT_DIR: ${{ steps.package.outputs.artifact-directory }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/existing-release"
-          # Listing distinguishes a missing release from authentication/network errors.
-          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[]' |
-            jq -s --arg tag "v$VERSION" '[.[] | select(.tag_name == $tag)] | first // {}' > "$RUNNER_TEMP/release.json"
-          for name in "DelegateBy.$VERSION.nupkg" "com.nanaios.delegateby-$VERSION.tgz"; do
-            if jq -e --arg name "$name" 'any(.assets[]?; .name == $name)' "$RUNNER_TEMP/release.json" >/dev/null; then
-              gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir "$RUNNER_TEMP/existing-release"
-              pwsh -File packaging/Compare-Archives.ps1 -Expected "artifacts/$name" -Actual "$RUNNER_TEMP/existing-release/$name"
-            fi
-          done
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          python3 - "$RUNNER_TEMP/releases.json" "$RUNNER_TEMP/release.json" "$VERSION" "$GITHUB_REPOSITORY" <<'PY'
+          import json, os, subprocess, sys
+          src, out, version, repo = sys.argv[1:]
+          pages = json.load(open(src, encoding='utf-8'))
+          releases = [item for page in pages for item in page]
+          found = next((r for r in releases if r.get('tag_name') == 'v' + version), None)
+          json.dump(found or {}, open(out, 'w', encoding='utf-8'))
+          if found:
+              for asset in found.get('assets', []):
+                  name = asset['name']
+                  if name in ('DelegateBy.%s.nupkg' % version, 'com.nanaios.delegateby-%s.tgz' % version):
+                      subprocess.run(['gh', 'release', 'download', 'v' + version, '--repo', repo, '--pattern', name, '--dir', os.environ['RUNNER_TEMP'] + '/existing-release'], check=True)
+          PY
+          python3 - "$RUNNER_TEMP/release.json" "$ARTIFACT_DIR/payload-hashes.json" "$ARTIFACT_DIR" "$RUNNER_TEMP/existing-release" <<'PY'
+          import hashlib, json, os, sys, zipfile, tarfile
+          release, hashes, artifact_dir, existing = sys.argv[1:]
+          release = json.load(open(release, encoding='utf-8'))
+          expected = json.loads(open(hashes, encoding='utf-8').read()) if os.path.isfile(hashes) else json.loads(hashes)
+          def files(path):
+              result = {}
+              if path.endswith('.nupkg'):
+                  z = zipfile.ZipFile(path)
+                  names = z.namelist()
+                  for n in names:
+                      if n in ('_rels/.rels', '[Content_Types].xml') or n.startswith('package/services/metadata/core-properties/') and n.endswith('.psmdcp'): continue
+                      result[n] = hashlib.sha256(z.read(n)).hexdigest()
+              else:
+                  with tarfile.open(path, 'r:gz') as t:
+                      for m in t.getmembers():
+                          if m.isfile(): result[m.name] = hashlib.sha256(t.extractfile(m).read()).hexdigest()
+              return result
+          for a in release.get('assets', []):
+              name = a['name']
+              if name not in expected: continue
+              actual = os.path.join(existing, name)
+              if not os.path.isfile(actual) or files(actual) != expected[name]:
+                  raise SystemExit('Existing release asset has different content: ' + name)
+          PY
       - name: Preflight existing NuGet package
         id: nuget
-        shell: pwsh
-        run: ./packaging/Test-PublishedNuGet.ps1 -PackagePath "artifacts/DelegateBy.$env:VERSION.nupkg" -Owner "${{ github.repository_owner }}"
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$VERSION" "${{ github.repository_owner }}" "artifacts/DelegateBy.$VERSION.nupkg" "artifacts/payload-hashes.json" "$GITHUB_OUTPUT" <<'PY'
+          import base64, hashlib, json, os, sys, urllib.request, urllib.error, urllib.parse, zipfile
+          version, owner, local, manifest_path, output = sys.argv[1:]
+          token = os.environ['GH_TOKEN']; actor = os.environ['GITHUB_ACTOR']
+          auth = base64.b64encode((actor + ':' + token).encode()).decode()
+          headers = {'Authorization': 'Basic ' + auth, 'Accept': 'application/json'}
+          service = 'https://nuget.pkg.github.com/%s/index.json' % owner
+          def get(url):
+              req = urllib.request.Request(url, headers=headers)
+              try: return urllib.request.urlopen(req)
+              except urllib.error.HTTPError as e:
+                  if e.code == 404: return e
+                  raise RuntimeError('NuGet request failed with HTTP %s' % e.code)
+          index = get(service)
+          if getattr(index, 'status', 200) != 200: raise RuntimeError('NuGet service index was not HTTP 200')
+          data = json.load(index)
+          resource = next((r.get('@id') for r in data['resources'] if r.get('@type','').startswith('PackageBaseAddress/3.0.0')), None)
+          if not resource: raise RuntimeError('NuGet service index has no PackageBaseAddress resource')
+          parsed = urllib.parse.urlparse(resource)
+          if parsed.scheme != 'https' or parsed.hostname != 'nuget.pkg.github.com': raise RuntimeError('Unexpected PackageBaseAddress URL')
+          with zipfile.ZipFile(local) as z:
+              nuspec = next(z.read(n).decode() for n in z.namelist() if n.endswith('.nuspec'))
+          import xml.etree.ElementTree as ET
+          root = ET.fromstring(nuspec); ns = {'n':'http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd'}
+          meta = root.find('n:metadata', ns) or root.find('metadata')
+          pkgid = meta.findtext('n:id', namespaces=ns) or meta.findtext('id'); ver = meta.findtext('n:version', namespaces=ns) or meta.findtext('version')
+          url = resource.rstrip('/') + '/%s/%s/%s.%s.nupkg' % (pkgid.lower(), ver.lower(), pkgid.lower(), ver.lower())
+          response = get(url)
+          if getattr(response, 'status', getattr(response, 'code', 200)) == 404:
+              open(output, 'a').write('exists=false\n')
+          else:
+              remote = response.read(); expected = json.load(open(manifest_path, encoding='utf-8'))[os.path.basename(local)]
+              with zipfile.ZipFile(local) as z: local_map = {n: hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist() if n not in ('_rels/.rels','[Content_Types].xml') and not (n.startswith('package/services/metadata/core-properties/') and n.endswith('.psmdcp')) and not n.endswith('/')}
+              with zipfile.ZipFile(__import__('io').BytesIO(remote)) as z: remote_map = {n: hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist() if n not in ('_rels/.rels','[Content_Types].xml') and not (n.startswith('package/services/metadata/core-properties/') and n.endswith('.psmdcp')) and not n.endswith('/')}
+              if local_map != expected or remote_map != expected: raise RuntimeError('Published NuGet package has different content')
+              open(output, 'a').write('exists=true\n')
+          PY
       - name: Preflight existing UPM tag content
         shell: bash
         run: |
           set -euo pipefail
-          existing=$(git ls-remote origin "refs/tags/upm/v$VERSION^{}" | awk '{print $1}')
-          if [[ -z "$existing" ]]; then existing=$(git ls-remote origin "refs/tags/upm/v$VERSION" | awk '{print $1}'); fi
+          existing=$(git ls-remote origin "refs/tags/upm/v$VERSION^{}" | awk '{print $1}'); [[ -n "$existing" ]] || existing=$(git ls-remote origin "refs/tags/upm/v$VERSION" | awk '{print $1}')
           if [[ -n "$existing" ]]; then
             git fetch origin "refs/tags/upm/v$VERSION"
-            mkdir -p "$RUNNER_TEMP/upm-preflight" "$RUNNER_TEMP/upm-current"
-            git -c core.autocrlf=false archive FETCH_HEAD | tar -x -C "$RUNNER_TEMP/upm-preflight"
-            tar -xzf "artifacts/com.nanaios.delegateby-$VERSION.tgz" -C "$RUNNER_TEMP/upm-current"
-            diff -qr "$RUNNER_TEMP/upm-preflight" "$RUNNER_TEMP/upm-current/package" >/dev/null || { echo "Existing UPM tag has different content"; exit 1; }
+            mkdir -p "$RUNNER_TEMP/upm-old" "$RUNNER_TEMP/upm-new"
+            git -c core.autocrlf=false archive FETCH_HEAD | tar -x -C "$RUNNER_TEMP/upm-old"
+            tar -xzf "artifacts/com.nanaios.delegateby-$VERSION.tgz" -C "$RUNNER_TEMP/upm-new"
+            diff -qr "$RUNNER_TEMP/upm-old" "$RUNNER_TEMP/upm-new/package" >/dev/null || { echo 'Existing UPM tag has different content'; exit 1; }
           fi
       - name: Verify source tag or create it
         shell: bash
         run: |
-          tag="v$VERSION"; existing=$(git ls-remote origin "refs/tags/$tag^{}" | awk '{print $1}')
-          if [[ -z "$existing" ]]; then existing=$(git ls-remote origin "refs/tags/$tag" | awk '{print $1}'); fi
-          if [[ -n "$existing" && "$existing" != "$MERGE_SHA" ]]; then echo "Source tag points to another commit"; exit 1; fi
+          set -euo pipefail
+          tag="v$VERSION"; existing=$(git ls-remote origin "refs/tags/$tag^{}" | awk '{print $1}'); [[ -n "$existing" ]] || existing=$(git ls-remote origin "refs/tags/$tag" | awk '{print $1}')
+          if [[ -n "$existing" && "$existing" != "$MERGE_SHA" ]]; then echo 'Source tag points to another commit'; exit 1; fi
           if [[ -z "$existing" ]]; then git config user.name github-actions; git config user.email 41898282+github-actions[bot]@users.noreply.github.com; git tag -a "$tag" "$MERGE_SHA" -m "$VERSION"; git push origin "$tag"; fi
       - name: Update UPM branch and version tag
         shell: bash
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/upm-package"; mkdir -p "$stage"; tar -xzf "artifacts/com.nanaios.delegateby-$VERSION.tgz" -C "$stage"
-          existing=$(git ls-remote origin "refs/tags/upm/v$VERSION^{}" | awk '{print $1}')
-          if [[ -z "$existing" ]]; then existing=$(git ls-remote origin "refs/tags/upm/v$VERSION" | awk '{print $1}'); fi
-          if [[ -n "$existing" ]]; then
-            git fetch origin "refs/tags/upm/v$VERSION"
-            old="$RUNNER_TEMP/upm-existing"; mkdir -p "$old"; git -c core.autocrlf=false archive FETCH_HEAD | tar -x -C "$old"
-            diff -qr "$stage/package" "$old" >/dev/null || { echo "Existing UPM tag has different content"; exit 1; }
-            echo "Existing UPM tag has matching normalized content; no mutation required."
-            exit 0
-          fi
-          upm_ref=$(git ls-remote origin refs/heads/upm)
-          if [[ -n "$upm_ref" ]]; then git fetch origin refs/heads/upm:refs/remotes/origin/upm; git worktree add --detach "$RUNNER_TEMP/upm-work" origin/upm; else git worktree add --detach "$RUNNER_TEMP/upm-work"; git -C "$RUNNER_TEMP/upm-work" checkout --orphan upm; fi
-          git -C "$RUNNER_TEMP/upm-work" rm -rf .
-          git -C "$RUNNER_TEMP/upm-work" clean -fdx
-          cp -a "$stage/package/." "$RUNNER_TEMP/upm-work/"; git -C "$RUNNER_TEMP/upm-work" -c core.autocrlf=false add -A
-          if git -C "$RUNNER_TEMP/upm-work" diff --cached --quiet; then commit=$(git -C "$RUNNER_TEMP/upm-work" rev-parse HEAD); else git -C "$RUNNER_TEMP/upm-work" -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com commit -m "UPM $VERSION"; commit=$(git -C "$RUNNER_TEMP/upm-work" rev-parse HEAD); fi
-          git -C "$RUNNER_TEMP/upm-work" config user.name github-actions
-          git -C "$RUNNER_TEMP/upm-work" config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git -C "$RUNNER_TEMP/upm-work" tag -a "upm/v$VERSION" "$commit" -m "UPM $VERSION"
-          git -C "$RUNNER_TEMP/upm-work" push --atomic origin HEAD:refs/heads/upm "refs/tags/upm/v$VERSION"
+          existing=$(git ls-remote origin "refs/tags/upm/v$VERSION^{}" | awk '{print $1}'); [[ -n "$existing" ]] || existing=$(git ls-remote origin "refs/tags/upm/v$VERSION" | awk '{print $1}'); [[ -n "$existing" ]] && exit 0
+          upm_ref=$(git ls-remote origin refs/heads/upm); if [[ -n "$upm_ref" ]]; then git fetch origin refs/heads/upm:refs/remotes/origin/upm; git worktree add --detach "$RUNNER_TEMP/upm-work" origin/upm; else git worktree add --detach "$RUNNER_TEMP/upm-work"; git -C "$RUNNER_TEMP/upm-work" checkout --orphan upm; fi
+          git -C "$RUNNER_TEMP/upm-work" rm -rf .; git -C "$RUNNER_TEMP/upm-work" clean -fdx; cp -a "$stage/package/." "$RUNNER_TEMP/upm-work/"; git -C "$RUNNER_TEMP/upm-work" -c core.autocrlf=false add -A
+          git -C "$RUNNER_TEMP/upm-work" config user.name github-actions; git -C "$RUNNER_TEMP/upm-work" config user.email 41898282+github-actions[bot]@users.noreply.github.com; git -C "$RUNNER_TEMP/upm-work" commit -m "UPM $VERSION"; commit=$(git -C "$RUNNER_TEMP/upm-work" rev-parse HEAD); git -C "$RUNNER_TEMP/upm-work" tag -a "upm/v$VERSION" "$commit" -m "UPM $VERSION"; git -C "$RUNNER_TEMP/upm-work" push --atomic origin HEAD:refs/heads/upm "refs/tags/upm/v$VERSION"
       - name: Create draft GitHub Release
         shell: bash
         run: |
-          if jq -e '.id' "$RUNNER_TEMP/release.json" >/dev/null; then
-            echo "Release already exists; keeping it in its current draft state."
-          else
-            args=()
-            if [[ "$VERSION" == *-* ]]; then args+=(--prerelease); fi
-            gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$VERSION" --generate-notes --draft "${args[@]}"
-          fi
+          set -euo pipefail
+          exists=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("tag_name") == "v" + sys.argv[2])' "$RUNNER_TEMP/release.json" "$VERSION")
+          if [[ "$exists" != True ]]; then args=(--draft); [[ "$VERSION" == *-* ]] && args+=(--prerelease); gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$VERSION" --generate-notes "${args[@]}"; fi
       - name: Publish NuGet package
         if: steps.nuget.outputs.exists != 'true'
         run: dotnet nuget push "artifacts/DelegateBy.$VERSION.nupkg" --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" --api-key "$GH_TOKEN"
@@ -129,16 +165,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          check_or_upload() {
-            local file="$1"; local name
-            name=$(basename "$file")
-            if jq -e --arg name "$name" 'any(.assets[]?; .name == $name)' "$RUNNER_TEMP/release.json" >/dev/null; then
-              echo "Release asset $name was verified during preflight."
-            else
-              gh release upload "v$VERSION" "$file" --repo "$GITHUB_REPOSITORY"
-            fi
-          }
-          check_or_upload "artifacts/DelegateBy.$VERSION.nupkg"
-          check_or_upload "artifacts/com.nanaios.delegateby-$VERSION.tgz"
+          python3 - "$RUNNER_TEMP/release.json" "$VERSION" <<'PY'
+          import json, os, subprocess, sys
+          release = json.load(open(sys.argv[1])); version = sys.argv[2]; names = {a['name'] for a in release.get('assets', [])}
+          for path in ('artifacts/DelegateBy.%s.nupkg' % version, 'artifacts/com.nanaios.delegateby-%s.tgz' % version):
+              if os.path.basename(path) not in names: subprocess.run(['gh','release','upload','v'+version,path,'--repo',os.environ['GITHUB_REPOSITORY']], check=True)
+          PY
       - name: Publish completed release
         run: gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false
