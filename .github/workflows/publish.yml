@@ -110,9 +110,11 @@ jobs:
           with zipfile.ZipFile(local) as z:
               nuspec = next(z.read(n).decode() for n in z.namelist() if n.endswith('.nuspec'))
           import xml.etree.ElementTree as ET
-          root = ET.fromstring(nuspec); ns = {'n':'http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd'}
-          meta = root.find('n:metadata', ns) or root.find('metadata')
-          pkgid = meta.findtext('n:id', namespaces=ns) or meta.findtext('id'); ver = meta.findtext('n:version', namespaces=ns) or meta.findtext('version')
+          root = ET.fromstring(nuspec)
+          meta = root.find('{*}metadata')
+          if meta is None: raise RuntimeError('Local nuspec has no metadata')
+          pkgid = meta.findtext('{*}id'); ver = meta.findtext('{*}version')
+          if not pkgid or not ver: raise RuntimeError('Local nuspec has no package id/version')
           url = resource.rstrip('/') + '/%s/%s/%s.%s.nupkg' % (pkgid.lower(), ver.lower(), pkgid.lower(), ver.lower())
           response = get(url)
           if getattr(response, 'status', getattr(response, 'code', 200)) == 404:
