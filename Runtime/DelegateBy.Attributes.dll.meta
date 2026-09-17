@@ -1,7 +1,5 @@
 fileFormatVersion: 2
-guid: 5e6c7609c29e4a20b9b4f6b8d9b72a2a
-labels:
-- RoslynAnalyzer
+guid: 8a6f0e4d7c2b49e1a5f3d9c0b7e2a614
 PluginImporter:
   serializedVersion: 2
   isPreloaded: 0
@@ -12,12 +10,12 @@ PluginImporter:
   - first:
       Any:
     second:
-      enabled: 0
+      enabled: 1
       settings: {}
   - first:
       Editor: Editor
     second:
-      enabled: 0
+      enabled: 1
       settings: {}
   userData:
   assetBundleName:
