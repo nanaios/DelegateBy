@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/DelegateBy.Attributes/DelegateBy.Attributes.csproj" />
     <Project Path="src/DelegateBy.Generator/DelegateBy.Generator.csproj" />
   </Folder>
   <Folder Name="/tests/">

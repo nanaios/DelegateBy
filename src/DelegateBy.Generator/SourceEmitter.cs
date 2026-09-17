@@ -267,7 +267,7 @@ internal static class SourceEmitter
     private static void AppendGeneratedAttributes(StringBuilder builder, int indent)
     {
         AppendIndent(builder, indent);
-        builder.AppendLine("[global::System.CodeDom.Compiler.GeneratedCodeAttribute(\"DelegateBy\", \"0.2.0\")]");
+        builder.AppendLine("[global::System.CodeDom.Compiler.GeneratedCodeAttribute(\"DelegateBy\", \"" + BuildInfo.Version + "\")]");
         AppendIndent(builder, indent);
         builder.AppendLine("[global::System.Runtime.CompilerServices.CompilerGeneratedAttribute]");
         AppendIndent(builder, indent);
@@ -281,11 +281,6 @@ internal static class SourceEmitter
     private static string FormatParameter(IParameterSymbol parameter)
     {
         var builder = new StringBuilder();
-        if (parameter.ScopedKind != ScopedKind.None)
-        {
-            builder.Append("scoped ");
-        }
-
         if (parameter.IsParams)
         {
             builder.Append("params ");
@@ -402,7 +397,7 @@ internal static class SourceEmitter
     {
         if (type.IsRecord)
         {
-            return type.TypeKind == TypeKind.Struct ? "record struct" : "record class";
+            return type.TypeKind == TypeKind.Struct ? "record struct" : "record";
         }
 
         return type.TypeKind switch
@@ -433,7 +428,6 @@ internal static class SourceEmitter
         RefKind.Ref => "ref ",
         RefKind.Out => "out ",
         RefKind.In => "in ",
-        RefKind.RefReadOnlyParameter => "ref readonly ",
         _ => string.Empty,
     };
 
@@ -442,7 +436,6 @@ internal static class SourceEmitter
         RefKind.Ref => "ref ",
         RefKind.Out => "out ",
         RefKind.In => "in ",
-        RefKind.RefReadOnlyParameter => "in ",
         _ => string.Empty,
     };
 

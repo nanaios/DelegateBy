@@ -1,10 +1,83 @@
 using Microsoft.CodeAnalysis;
+using System.Reflection;
+using System.Runtime.Loader;
 using Xunit;
 
 namespace DelegateBy.Generator.Tests;
 
 public sealed class DelegateByGeneratorTests
 {
+    [Fact]
+    public void ExternalAttributeIsNotGeneratedAndConditionalUsageIsControlledBySymbol()
+    {
+        const string source = """
+            using DelegateBy;
+            public interface IRun { void Run(); }
+            public interface IStop { void Stop(); }
+            public sealed class Foo : IRun, IStop { public void Run() { } public void Stop() { } }
+            [DelegateBy(nameof(_run))]
+            [DelegateBy(nameof(_stop))]
+            public partial class Wrapper
+            {
+                private readonly IRun _run = new Foo();
+                private readonly IStop _stop = new Foo();
+            }
+            """;
+
+        var withoutSymbol = GeneratorTestHost.Run(source);
+        Assert.Empty(withoutSymbol.Errors);
+        Assert.DoesNotContain(withoutSymbol.GeneratedSources.Keys,
+            key => key.Contains("Attribute", StringComparison.Ordinal));
+        Assert.Contains("public void Run()", withoutSymbol.DelegationSource);
+        Assert.Contains("public void Stop()", withoutSymbol.DelegationSource);
+        Assert.Empty(ReadRuntimeAttributes(withoutSymbol.Compilation));
+
+        var withSymbol = GeneratorTestHost.RunWithAttributesSymbol(source);
+        Assert.Empty(withSymbol.Errors);
+        Assert.Equal(2, ReadRuntimeAttributes(withSymbol.Compilation).Length);
+    }
+
+    private static object[] ReadRuntimeAttributes(Compilation compilation)
+    {
+        using var stream = new MemoryStream();
+        Assert.True(compilation.Emit(stream).Success);
+        stream.Position = 0;
+        var loadContext = new AssemblyLoadContext(null, isCollectible: true);
+        var assembly = loadContext.LoadFromStream(stream);
+        var attributes = assembly.GetType("Wrapper")!.GetCustomAttributes(inherit: false);
+        loadContext.Unload();
+        return attributes;
+    }
+
+    [Fact]
+    public void CSharp9RecordAndRefKindsAreEmittedWithExternalAttributes()
+    {
+        const string source = """
+            using DelegateBy;
+            public interface IContract
+            {
+                ref readonly int ReadOnly();
+                int Transform(in int value, ref int changed, out int count);
+            }
+            public sealed class Contract : IContract
+            {
+                private readonly int _value = 3;
+                public ref readonly int ReadOnly() => ref _value;
+                public int Transform(in int value, ref int changed, out int count)
+                { count = value; changed += value; return changed; }
+            }
+            [DelegateBy(nameof(_contract))]
+            public partial record Wrapper
+            { private readonly IContract _contract = new Contract(); }
+            """;
+
+        var result = GeneratorTestHost.RunCSharp9(source);
+
+        Assert.Empty(result.Errors);
+        Assert.Contains("partial record Wrapper : global::IContract", result.DelegationSource);
+        Assert.Contains("public ref readonly int ReadOnly()", result.DelegationSource);
+        Assert.Contains("public int Transform(in int value, ref int changed, out int count)", result.DelegationSource);
+    }
     [Fact]
     public void GeneratesRefReturnsOverloadsAndValueTasks()
     {
