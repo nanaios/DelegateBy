@@ -1,0 +1,194 @@
+name: Package DelegateBy
+description: Build, package, smoke test, and validate DelegateBy NuGet and UPM artifacts
+inputs:
+  version:
+    description: Package version (defaults to the Version in DelegateBy.Generator.csproj)
+    required: false
+    default: ''
+outputs:
+  version:
+    description: Resolved package version
+    value: ${{ steps.package.outputs.version }}
+  artifact-directory:
+    description: Directory containing the NuGet, UPM, and payload hash artifacts
+    value: ${{ steps.package.outputs.artifact-directory }}
+runs:
+  using: composite
+  steps:
+    - name: Set up .NET SDKs
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: |
+          8.0.x
+          10.0.x
+
+    - name: Build, package, and validate
+      id: package
+      shell: bash
+      env:
+        REQUESTED_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        root="$GITHUB_WORKSPACE"
+        artifact_dir="$root/artifacts"
+        mkdir -p "$artifact_dir"
+        python3 - "$root/src/DelegateBy.Generator/DelegateBy.Generator.csproj" "$REQUESTED_VERSION" "$GITHUB_OUTPUT" <<'PY'
+        import pathlib, re, sys
+        project = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+        requested = sys.argv[2].strip()
+        version = requested or re.search(r'<Version>([^<]+)</Version>', project).group(1)
+        if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?', version):
+            raise SystemExit(f'Invalid SemVer: {version}')
+        with open(sys.argv[3], 'a', encoding='utf-8') as output:
+            output.write(f'version={version}\nartifact-directory={pathlib.Path(sys.argv[1]).parents[2] / "artifacts"}\n')
+        PY
+        version="$(python3 -c 'import re,pathlib; print(re.search(r"<Version>([^<]+)</Version>", pathlib.Path("src/DelegateBy.Generator/DelegateBy.Generator.csproj").read_text()).group(1))')"
+        if [[ -n "$REQUESTED_VERSION" ]]; then version="$REQUESTED_VERSION"; fi
+
+        dotnet restore "$root/DelegateBy.slnx"
+        dotnet build "$root/DelegateBy.slnx" --configuration Release --no-restore -p:Version="$version" -p:ContinuousIntegrationBuild=true
+        dotnet test "$root/tests/DelegateBy.Generator.Tests/DelegateBy.Generator.Tests.csproj" --configuration Release --no-build
+        dotnet pack "$root/src/DelegateBy.Generator/DelegateBy.Generator.csproj" --configuration Release --no-build --output "$artifact_dir" -p:Version="$version" -p:ContinuousIntegrationBuild=true
+
+        stage="$(mktemp -d)"
+        trap 'rm -rf "$stage"' EXIT
+        package="$stage/package"
+        mkdir -p "$package/Runtime" "$package/Analyzers"
+        cp "$root/packaging/upm/package.json" "$package/package.json"
+        cp "$root/LICENSE" "$package/LICENSE"
+        cp "$root/README.md" "$package/README.md"
+        cp "$root/packaging/upm/package.json.meta" "$package/package.json.meta"
+        cp "$root/packaging/upm/LICENSE.meta" "$package/LICENSE.meta"
+        cp "$root/packaging/upm/README.md.meta" "$package/README.md.meta"
+        cp "$root/packaging/upm/Runtime.meta" "$package/Runtime.meta"
+        cp "$root/packaging/upm/Analyzers.meta" "$package/Analyzers.meta"
+        cp "$root/src/DelegateBy.Attributes/bin/Release/netstandard2.0/DelegateBy.Attributes.dll" "$package/Runtime/DelegateBy.Attributes.dll"
+        cp "$root/src/DelegateBy.Generator/bin/Release/netstandard2.0/DelegateBy.Generator.dll" "$package/Analyzers/DelegateBy.Generator.dll"
+        cp "$root/packaging/upm/Runtime/DelegateBy.Attributes.dll.meta" "$package/Runtime/DelegateBy.Attributes.dll.meta"
+        cp "$root/packaging/upm/Analyzers/DelegateBy.Generator.dll.meta" "$package/Analyzers/DelegateBy.Generator.dll.meta"
+        python3 - "$package/package.json" "$version" <<'PY'
+        import json, pathlib, sys
+        p = pathlib.Path(sys.argv[1]); data = json.loads(p.read_text(encoding='utf-8')); data['version'] = sys.argv[2]
+        p.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+        PY
+        tar -czf "$artifact_dir/com.nanaios.delegateby-$version.tgz" -C "$stage" package
+
+        smoke="$(mktemp -d)"
+        trap 'rm -rf "$stage" "$smoke"' EXIT
+        mkdir -p "$smoke/sample"
+        cp "$root/Directory.Build.props" "$smoke/Directory.Build.props"
+        cp "$root/samples/DelegateBy.Sample/DelegateBy.Sample.csproj" "$root/samples/DelegateBy.Sample/Program.cs" "$smoke/sample/"
+        dotnet restore "$smoke/sample/DelegateBy.Sample.csproj" --source "$artifact_dir" --packages "$smoke/packages" -p:UsePackedPackage=true -p:PackageVersion="$version" -p:RestoreSources="$artifact_dir" -p:RestorePackagesPath="$smoke/packages" -p:BaseIntermediateOutputPath="$smoke/obj/" -p:MSBuildProjectExtensionsPath="$smoke/obj/"
+        output="$(dotnet run --project "$smoke/sample/DelegateBy.Sample.csproj" --configuration Release --no-restore -p:UsePackedPackage=true -p:PackageVersion="$version" -p:BaseIntermediateOutputPath="$smoke/obj/" -p:MSBuildProjectExtensionsPath="$smoke/obj/")"
+        grep -q '^Hello, Codex!$' <<<"$output"
+        grep -q '^Count: 1$' <<<"$output"
+
+        python3 - "$artifact_dir/DelegateBy.$version.nupkg" "$artifact_dir/com.nanaios.delegateby-$version.tgz" "$artifact_dir/payload-hashes.json" <<'PY'
+        import hashlib, json, pathlib, re, sys, tarfile, tempfile, zipfile
+        nupkg, tgz, hashes = map(pathlib.Path, sys.argv[1:])
+        ignored = re.compile(r'^(?:_rels/\.rels|\[Content_Types\]\.xml|package/services/metadata/core-properties/[^/]+\.psmdcp)$')
+        def sha(data): return hashlib.sha256(data).hexdigest()
+        def nupkg_map(path):
+            with zipfile.ZipFile(path) as z:
+                names = z.namelist()
+                required = {'README.md','DelegateBy.nuspec','analyzers/dotnet/cs/DelegateBy.Generator.dll','lib/netstandard2.0/DelegateBy.Attributes.dll'}
+                if not required <= set(names): raise AssertionError('Missing NuGet entry')
+                if any(('Microsoft.CodeAnalysis' in n or 'System.Collections.Immutable' in n) for n in names): raise AssertionError('Roslyn dependencies bundled')
+                if any(n.lower().endswith('.dll') and n not in {'analyzers/dotnet/cs/DelegateBy.Generator.dll','lib/netstandard2.0/DelegateBy.Attributes.dll'} for n in names): raise AssertionError('Unexpected NuGet DLL')
+                return {n: sha(z.read(n)) for n in names if not ignored.match(n) and not n.endswith('/')}
+        def tgz_map(path):
+            with tarfile.open(path, 'r:gz') as t:
+                members = t.getmembers()
+                if any(m.issym() or m.islnk() for m in members): raise AssertionError('UPM archive contains a link')
+                if any(m.name != 'package' and not m.name.startswith('package/') for m in members): raise AssertionError('UPM entries outside package')
+                return {m.name: sha(t.extractfile(m).read()) for m in members if m.isfile()}
+        package_version = re.search(r'-([0-9][^/]*)\.tgz$', tgz.name).group(1)
+        def validate_upm(path):
+            with tarfile.open(path, 'r:gz') as t:
+                members = t.getmembers()
+                if any(m.issym() or m.islnk() for m in members): raise AssertionError('UPM archive contains a link')
+                if any(m.name != 'package' and not m.name.startswith('package/') for m in members): raise AssertionError('UPM entries outside package')
+                files = {m.name: t.extractfile(m).read() for m in members if m.isfile()}
+            required = {'package/package.json','package/LICENSE','package/README.md','package/package.json.meta','package/LICENSE.meta','package/README.md.meta','package/Runtime.meta','package/Analyzers.meta','package/Runtime/DelegateBy.Attributes.dll','package/Runtime/DelegateBy.Attributes.dll.meta','package/Analyzers/DelegateBy.Generator.dll','package/Analyzers/DelegateBy.Generator.dll.meta'}
+            if not required <= files.keys(): raise AssertionError('Missing UPM entry')
+            manifest = json.loads(files['package/package.json'])
+            expected_version = re.search(r'-([0-9][^/]*)\.tgz$', path.name).group(1)
+            if manifest.get('name') != 'com.nanaios.delegateby' or manifest.get('unity') != '6000.0' or manifest.get('version') != expected_version: raise AssertionError('Invalid UPM manifest')
+            if any(n.endswith(('.cs','.asmdef','.pdb')) for n in files): raise AssertionError('UPM contains source or asmdef/build artifact')
+            if len([n for n in files if n.lower().endswith('.dll')]) != 2: raise AssertionError('UPM DLL set is invalid')
+            attrs = files['package/Runtime/DelegateBy.Attributes.dll.meta'].decode()
+            if not re.search(r'^guid: 8a6f0e4d7c2b49e1a5f3d9c0b7e2a614$', attrs, re.M) or not re.search(r'isExplicitlyReferenced: 0', attrs) or not re.search(r'Any:\n    second:\n      enabled: 1', attrs) or not re.search(r'Editor: Editor\n    second:\n      enabled: 1', attrs): raise AssertionError('Attributes plugin meta is invalid')
+            gen = files['package/Analyzers/DelegateBy.Generator.dll.meta'].decode()
+            if not re.search(r'^guid: 5e6c7609c29e4a20b9b4f6b8d9b72a2a$', gen, re.M) or 'RoslynAnalyzer' not in gen or not re.search(r'Any:\n    second:\n      enabled: 0', gen) or not re.search(r'Editor: Editor\n    second:\n      enabled: 0', gen): raise AssertionError('Generator plugin meta is invalid')
+            guids = re.findall(r'^guid: ([0-9a-f]+)$', '\n'.join(v.decode(errors='ignore') for n,v in files.items() if n.endswith('.meta')), re.M)
+            if len(guids) != len(set(guids)): raise AssertionError('UPM GUIDs are not unique')
+            expected_guids = {
+                'package/package.json.meta': '7b1f75d2e7f845f9b6cf0c6cb2ea6f31',
+                'package/README.md.meta': 'd5b0f0d7c5e54e2e8e8a7e0bd0d9b742',
+                'package/LICENSE.meta': 'f2d6e3a4c8f94e91a8d0d2f3b4c5e617',
+                'package/Runtime.meta': '2b5e2f8a9a4a47d9b2c4e3f0a1b68732',
+                'package/Analyzers.meta': '4d7f3b9c1e5a48f0b2c6d8e9a3f70451',
+                'package/Runtime/DelegateBy.Attributes.dll.meta': '8a6f0e4d7c2b49e1a5f3d9c0b7e2a614',
+                'package/Analyzers/DelegateBy.Generator.dll.meta': '5e6c7609c29e4a20b9b4f6b8d9b72a2a',
+            }
+            for name, guid in expected_guids.items():
+                if not re.search(rf'^guid: {guid}$', files[name].decode(), re.M): raise AssertionError(f'Unexpected GUID for {name}')
+            return files
+        nm, tm = nupkg_map(nupkg), tgz_map(tgz); validate_upm(tgz)
+        # Required negative cases prove that the validator rejects common publishing mistakes.
+        def write_tgz(files, path):
+            with tempfile.TemporaryDirectory() as d:
+                root = pathlib.Path(d)
+                for name, data in files.items():
+                    target = root / name; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(data)
+                with tarfile.open(path, 'w:gz') as out: out.add(root / 'package', arcname='package')
+        def expect_failure(label, mutate, expected):
+            with tempfile.TemporaryDirectory() as d:
+                candidate = dict(validate_files)
+                mutate(candidate)
+                target = pathlib.Path(d) / f'bad-{package_version}.tgz'; write_tgz(candidate, target)
+                try: validate_upm(target)
+                except AssertionError as error:
+                    if expected not in str(error): raise AssertionError(f'Negative UPM case had unexpected error: {label}: {error}')
+                    return
+                raise AssertionError(f'Negative UPM case was accepted: {label}')
+        validate_files = {}
+        with tarfile.open(tgz) as t:
+            for member in t.getmembers():
+                if member.isfile(): validate_files[member.name] = t.extractfile(member).read()
+        expect_failure('missing attributes DLL', lambda f: (f.pop('package/Runtime/DelegateBy.Attributes.dll'), f.pop('package/Runtime/DelegateBy.Attributes.dll.meta')), 'Missing UPM entry')
+        expect_failure('extra DLL', lambda f: f.update({'package/Runtime/Rogue.dll': b'bad', 'package/Runtime/Rogue.dll.meta': b'fileFormatVersion: 2\nguid: 1234567890abcdef1234567890abcdef\n'}), 'UPM DLL set is invalid')
+        def attrs_auto_off(f):
+            f['package/Runtime/DelegateBy.Attributes.dll.meta'] = f['package/Runtime/DelegateBy.Attributes.dll.meta'].replace(b'isExplicitlyReferenced: 0', b'isExplicitlyReferenced: 1')
+        expect_failure('attributes plugin disabled', attrs_auto_off, 'Attributes plugin meta is invalid')
+        def generator_enabled(f):
+            f['package/Analyzers/DelegateBy.Generator.dll.meta'] = f['package/Analyzers/DelegateBy.Generator.dll.meta'].replace(b'enabled: 0', b'enabled: 1')
+        expect_failure('generator enabled', generator_enabled, 'Generator plugin meta is invalid')
+        with zipfile.ZipFile(nupkg) as z, tarfile.open(tgz) as t:
+            if z.read('lib/netstandard2.0/DelegateBy.Attributes.dll') != t.extractfile('package/Runtime/DelegateBy.Attributes.dll').read(): raise AssertionError('Attributes DLL differs')
+            if z.read('analyzers/dotnet/cs/DelegateBy.Generator.dll') != t.extractfile('package/Analyzers/DelegateBy.Generator.dll').read(): raise AssertionError('Generator DLL differs')
+        # Repacking after changing timestamps produces the same normalized content.
+        with tempfile.TemporaryDirectory() as d:
+            old = pathlib.Path(d) / 'old'; old.mkdir();
+            with tarfile.open(tgz) as t: t.extractall(old)
+            for p in old.rglob('*'):
+                if p.is_file(): p.touch()
+            repacked = pathlib.Path(d) / 'repacked.tgz'
+            with tarfile.open(repacked, 'w:gz') as out: out.add(old / 'package', arcname='package')
+            if tgz_map(repacked) != tm: raise AssertionError('Timestamp-only repack differs')
+            changed = old / 'package/README.md'; changed.write_bytes(changed.read_bytes() + b'\nchanged')
+            with tarfile.open(repacked, 'w:gz') as out: out.add(old / 'package', arcname='package')
+            if tgz_map(repacked) == tm: raise AssertionError('Modified payload was accepted')
+        # ZIP bookkeeping may differ, but equivalent NuGet payloads must compare equal.
+        with tempfile.TemporaryDirectory() as d:
+            repacked = pathlib.Path(d) / 'repacked.nupkg'
+            with zipfile.ZipFile(nupkg) as source, zipfile.ZipFile(repacked, 'w', zipfile.ZIP_DEFLATED) as target:
+                for info in source.infolist(): target.writestr(info.filename, source.read(info.filename))
+            if nupkg_map(repacked) != nm: raise AssertionError('NuGet payload-only repack differs')
+            changed = pathlib.Path(d) / 'changed.nupkg'
+            with zipfile.ZipFile(nupkg) as source, zipfile.ZipFile(changed, 'w', zipfile.ZIP_DEFLATED) as target:
+                for info in source.infolist(): target.writestr(info.filename, source.read(info.filename) + (b'\nchanged' if info.filename == 'README.md' else b''))
+            if nupkg_map(changed) == nm: raise AssertionError('Modified NuGet payload was accepted')
+        pathlib.Path(hashes).write_text(json.dumps({'DelegateBy.' + nupkg.name.split('DelegateBy.',1)[1]: nm, tgz.name: tm}, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+        print('Package validation passed, including DLL identity and normalized payload checks.')
+        PY

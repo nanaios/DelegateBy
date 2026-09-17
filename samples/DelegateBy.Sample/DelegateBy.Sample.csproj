@@ -2,12 +2,18 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
+    <UsePackedPackage Condition="'$(UsePackedPackage)' == ''">false</UsePackedPackage>
+    <PackageVersion Condition="'$(PackageVersion)' == ''">0.4.0</PackageVersion>
   </PropertyGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="'$(UsePackedPackage)' != 'true'">
     <ProjectReference Include="../../src/DelegateBy.Attributes/DelegateBy.Attributes.csproj" />
     <ProjectReference Include="../../src/DelegateBy.Generator/DelegateBy.Generator.csproj"
                       OutputItemType="Analyzer"
                       ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UsePackedPackage)' == 'true'">
+    <PackageReference Include="DelegateBy" Version="$(PackageVersion)" />
   </ItemGroup>
 </Project>
